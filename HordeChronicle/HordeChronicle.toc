@@ -1,0 +1,18 @@
+## Interface: 16001, 120105
+## Title: |cffb30000Летопись Орды|r
+## Notes: Летопись побед над игроками Альянса: кто, где и как пал от вашей руки.
+## Author: braflovskikyle40-debug
+## Version: 0.2.0
+## X-Website: https://github.com/braflovskikyle40-debug/HordeChronicle
+## IconTexture: Interface\Icons\INV_Misc_Book_09
+## SavedVariables: HordeChronicleDB
+
+Data_Ru.lua
+Narrative.lua
+Stats.lua
+Sagas.lua
+Announce.lua
+Core.lua
+UI_Toast.lua
+UI_Book.lua
+Slash.lua
