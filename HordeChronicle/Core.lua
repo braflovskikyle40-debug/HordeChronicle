@@ -15,8 +15,12 @@ local isSecret = issecretvalue or function() return false end
 local SPELL_WINDOW = 10        -- сек: какие мои заклинания считать «последними перед победой»
 local SPELL_KEEP = 3
 local CACHE_MAX = 400
+local ENEMY_WINDOW = 15       -- сек: враг в моей цели так недавно — смерть засчитываем «от Альянса»
+local DEATHS_MAX = 2000
 
-C.diag = { partyKills = 0, secret = 0, notPlayer = 0, friendly = 0, unknownFaction = 0, recorded = 0, cacheHits = 0, lastReason = "", events = {} }
+C.diag = { partyKills = 0, secret = 0, notPlayer = 0, friendly = 0, unknownFaction = 0, recorded = 0, cacheHits = 0, lastReason = "", events = {},
+           deaths = { enemy = 0, none = 0, secret = 0 } }
+C.lastEnemyTarget, C.lastEnemyName = -1e9, nil
 C.cache = {}          -- guid → {level, faction, guild, seen}
 C.cacheSize = 0
 C.recentSpells = {}   -- {name, t}
@@ -35,6 +39,7 @@ function C.db()
   HordeChronicleDB = HordeChronicleDB or {}
   local db = HordeChronicleDB
   db.kills = db.kills or {}
+  db.deaths = db.deaths or {}
   db.settings = db.settings or {}
   local s = db.settings
   if s.channel == nil then s.channel = "self" end          -- self | guild | group
@@ -45,6 +50,7 @@ function C.db()
   if s.recordAlly == nil then s.recordAlly = true end
   if s.tone == nil then s.tone = N.DEFAULT_TONE end     -- epic | mock | hard
   if s.hardInChat == nil then s.hardInChat = false end  -- 18+ в чат гильдии/группы
+  if s.shareWar == nil then s.shareWar = true end       -- слать свой счёт «Индекса войны» гильдии
   return db
 end
 
@@ -98,7 +104,54 @@ function C.allyName(guid)
   return nil
 end
 
-function C.onPlayerDead() C.streak.count = 0 end
+-- Игрок другой фракции? secret → nil (не знаем)
+local function enemyPlayer(unit)
+  if not UnitExists(unit) then return false end
+  local isPlayer, faction = UnitIsPlayer(unit), UnitFactionGroup(unit)
+  if isSecret(isPlayer) or isSecret(faction) then return nil end
+  local mine = UnitFactionGroup("player")
+  return isPlayer and (faction == "Alliance" or faction == "Horde") and faction ~= mine or false
+end
+
+function C.noteTarget()
+  C.remember("target")
+  if enemyPlayer("target") then
+    C.lastEnemyTarget, C.lastEnemyName = GetTime(), safe(UnitName("target"))
+  end
+end
+
+-- Был ли рядом враг-игрок в момент моей смерти. Приблизительно: без журнала боя убийцу не узнать.
+-- Возвращает "enemy" и имя (если известно), "none" или "secret".
+function C.enemyAtDeath()
+  local secret = false
+  local function check(u)
+    local e = enemyPlayer(u)
+    if e == nil then secret = true end
+    return e
+  end
+  if check("target") then return "enemy", safe(UnitName("target")) end
+  for i = 1, 40 do
+    local u = "nameplate" .. i
+    if check(u) then
+      local onMe = UnitIsUnit(u .. "target", "player")
+      if isSecret(onMe) then secret = true elseif onMe then return "enemy", safe(UnitName(u)) end
+    end
+  end
+  if GetTime() - C.lastEnemyTarget <= ENEMY_WINDOW then return "enemy", C.lastEnemyName end
+  return secret and "secret" or "none"
+end
+
+function C.onPlayerDead()
+  C.streak.count = 0
+  local verdict, killer = C.enemyAtDeath()
+  C.diag.deaths[verdict] = C.diag.deaths[verdict] + 1
+  if verdict ~= "enemy" then return verdict end
+  local deaths = C.db().deaths
+  deaths[#deaths + 1] = { ts = time(), hero = C.heroKey(), killer = killer }
+  while #deaths > DEATHS_MAX do table.remove(deaths, 1) end
+  if ns.War then ns.War.changed() end
+  return verdict
+end
 
 local function reject(reason, field)
   C.diag.lastReason = reason
@@ -214,19 +267,27 @@ function C.start()
   reg("PLAYER_TARGET_CHANGED")
   reg("UPDATE_MOUSEOVER_UNIT")
   reg("NAME_PLATE_UNIT_ADDED")
+  reg("CHAT_MSG_ADDON")
+  reg("PLAYER_GUILD_UPDATE")
   local okSpell = pcall(f.RegisterUnitEvent, f, "UNIT_SPELLCAST_SUCCEEDED", "player")
   C.diag.events["UNIT_SPELLCAST_SUCCEEDED"] = okSpell
-  f:SetScript("OnEvent", function(_, ev, a1, a2, a3)
+  f:SetScript("OnEvent", function(_, ev, a1, a2, a3, a4)
     if ev == "ADDON_LOADED" and a1 == ADDON then
       C.db()
+      if ns.War then ns.War.start() end
       if ns.onReady then ns.onReady() end
     elseif ev == "PARTY_KILL" then
       local ok, err = pcall(C.onPartyKill, a1, a2)
       if not ok then C.diag.lastReason = "ошибка: " .. tostring(err) end
     elseif ev == "PLAYER_DEAD" then
-      C.onPlayerDead()
+      local ok, err = pcall(C.onPlayerDead)
+      if not ok then C.streak.count = 0; C.diag.lastReason = "ошибка смерти: " .. tostring(err) end
+    elseif ev == "CHAT_MSG_ADDON" then
+      if ns.War then pcall(ns.War.onAddonMessage, a1, a2, a3, a4) end
+    elseif ev == "PLAYER_GUILD_UPDATE" then
+      if ns.War and not ns.War.greeted then pcall(ns.War.hello) end
     elseif ev == "PLAYER_TARGET_CHANGED" then
-      C.remember("target")
+      C.noteTarget()
     elseif ev == "UPDATE_MOUSEOVER_UNIT" then
       C.remember("mouseover")
     elseif ev == "NAME_PLATE_UNIT_ADDED" then

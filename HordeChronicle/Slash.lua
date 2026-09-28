@@ -8,6 +8,7 @@ function ns.onRecord(rec)
   if s.toast and ns.Toast then ns.Toast.show(rec) end
   if s.sound then PlaySound((SOUNDKIT and SOUNDKIT.RAID_WARNING) or 8959, "Master") end
   if s.screenshot and not rec.test and Screenshot then C_Timer.After(0.4, Screenshot) end
+  if not rec.test and rec.killer == "me" and ns.War then ns.War.changed() end
   if ns.Book then ns.Book.refresh() end
 end
 
@@ -36,6 +37,11 @@ local function diag()
     d.partyKills, d.recorded, d.secret, d.notPlayer, d.friendly, d.unknownFaction, d.cacheHits))
   A.printSelf("последний разбор: " .. (d.lastReason ~= "" and d.lastReason or "—"))
   A.printSelf(("в летописи %d записей, сказаний ИИ %d"):format(#C.db().kills, sagaCount()))
+  local w, dd = ns.War.diag, d.deaths
+  A.printSelf(("индекс войны: префикс %s, гильдия %s, отправлено %d (не ушло %d), принято %d, отброшено %d%s"):format(
+    w.prefix and "ок" or "НЕТ", ns.War.guildKey() and "есть" or "нет", w.sent, w.failed, w.received, w.rejected,
+    w.lastReject ~= "" and (" (последнее: " .. w.lastReject .. ")") or ""))
+  A.printSelf(("смерти: от игроков засчитано %d, врага рядом не было %d, скрыто(secret) %d"):format(dd.enemy, dd.none, dd.secret))
 end
 
 local TONE_WORDS = { ["эпичный"] = "epic", ["глумливый"] = "mock", ["18+"] = "hard", ["жёсткий"] = "hard", ["жесткий"] = "hard", epic = "epic", mock = "mock", hard = "hard" }
@@ -55,6 +61,9 @@ SlashCmdList.HORDECHRONICLE = function(msg)
     diag()
   elseif cmd == "стат" or cmd == "stats" then
     ns.Book.tab = "stats"; ns.Book.show()
+  elseif cmd == "война" or cmd == "war" then
+    A.printSelf(ns.War.summary(ns.War.report()))
+    ns.Book.tab = "war"; ns.Book.show()
   elseif cmd == "канал" or cmd == "channel" then
     local ch = CHANNEL_WORDS[arg]
     if ch then
@@ -73,7 +82,7 @@ SlashCmdList.HORDECHRONICLE = function(msg)
       A.printSelf("тон: /летопись тон эпичный | глумливый | 18+")
     end
   else
-    A.printSelf("команды: /летопись — книга, тест — пробная победа, диаг — диагностика, стат — статистика, канал себе|гильдия|группа, тон эпичный|глумливый|18+")
+    A.printSelf("команды: /летопись — книга, тест — пробная победа, диаг — диагностика, стат — статистика, война — индекс войны, канал себе|гильдия|группа, тон эпичный|глумливый|18+")
   end
 end
 

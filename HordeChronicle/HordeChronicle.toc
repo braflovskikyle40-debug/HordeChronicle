@@ -2,7 +2,7 @@
 ## Title: |cffb30000Летопись Орды|r
 ## Notes: Летопись побед над игроками Альянса: кто, где и как пал от вашей руки.
 ## Author: braflovskikyle40-debug
-## Version: 0.2.0
+## Version: 0.3.0
 ## X-Website: https://github.com/braflovskikyle40-debug/HordeChronicle
 ## IconTexture: Interface\Icons\INV_Misc_Book_09
 ## SavedVariables: HordeChronicleDB
@@ -10,6 +10,7 @@
 Data_Ru.lua
 Narrative.lua
 Stats.lua
+War.lua
 Sagas.lua
 Announce.lua
 Core.lua

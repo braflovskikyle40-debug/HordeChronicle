@@ -32,10 +32,19 @@ function issecretvalue(v) return v == SECRET end
 local sent, printed = {}, {}
 function SendChatMessage(text, ch) sent[#sent + 1] = { text = text, ch = ch } end
 DEFAULT_CHAT_FRAME = { AddMessage = function(_, t) printed[#printed + 1] = t end }
+function GetServerTime() return W.now or os.time() end
+function UnitIsUnit(a) return (W.onMe or {})[a] end
+local addonSent, timers = {}, {}
+C_ChatInfo = {
+  SendAddonMessage = function(p, t, ch) addonSent[#addonSent + 1] = { p = p, t = t, ch = ch }; return W.sendResult end,
+  RegisterAddonMessagePrefix = function() return true end,
+}
+C_Timer = { After = function(d, fn) timers[#timers + 1] = { d = d, fn = fn } end, NewTicker = function() end }
+local function runTimers() local list = timers; timers = {}; for _, t in ipairs(list) do t.fn() end end
 
 local function load(name) assert(loadfile(ROOT .. name))(ADDON, ns) end
-for _, f in ipairs({ "Data_Ru.lua", "Narrative.lua", "Stats.lua", "Announce.lua", "Core.lua" }) do load(f) end
-local C, N, S, A, D = ns.Core, ns.Narrative, ns.Stats, ns.Announce, ns.Data
+for _, f in ipairs({ "Data_Ru.lua", "Narrative.lua", "Stats.lua", "War.lua", "Announce.lua", "Core.lua" }) do load(f) end
+local C, N, S, A, D, Wr = ns.Core, ns.Narrative, ns.Stats, ns.Announce, ns.Data, ns.War
 
 -- ---------- мини-фреймворк ----------
 local passed, failed = 0, 0
@@ -43,8 +52,11 @@ local function test(name, fn)
   HordeChronicleDB = nil
   C.cache, C.cacheSize, C.recentSpells, C.streak, C.seq = {}, 0, {}, { count = 0, last = 0 }, 0
   W = { guids = { player = "Player-1-ME" }, players = {} }
-  sent, printed = {}, {}
+  sent, printed, addonSent, timers = {}, {}, {}, {}
   A.lastSent, A.pending = -1e9, nil
+  C.lastEnemyTarget, C.lastEnemyName, C.diag.deaths = -1e9, nil, { enemy = 0, none = 0, secret = 0 }
+  Wr.pendingSend, Wr.replyScheduled, Wr.lastReply, Wr.dirty, Wr.greeted = nil, nil, nil, nil, nil
+  Wr.diag = { prefix = nil, sent = 0, failed = 0, received = 0, rejected = 0, lastReject = "" }
   local ok, err = pcall(fn)
   if ok then passed = passed + 1 else failed = failed + 1; print("FAIL " .. name .. ": " .. tostring(err)) end
 end
@@ -255,6 +267,172 @@ end)
 test("тестовые победы не уходят в канал", function()
   W.inGuild = true
   eq(A.announce({ short = "Т.", killer = "me", test = true }, { channel = "guild" }, 100), "self"); eq(#sent, 0)
+end)
+
+-- ---------- индекс войны ----------
+local DAY = 86400
+local TODAY = 20700                       -- номер суток по UTC
+local function at(day, hour) return day * DAY + (hour or 12) * 3600 end
+local function near(a, b, msg) if math.abs(a - b) > 1e-9 then error((msg or "") .. " ожидалось " .. b .. ", получено " .. a, 2) end end
+local function inGuild() W.inGuild = true; W.guilds = { player = "Кровавый Топор" }; W.now = at(TODAY) end
+local GUILD = "Кровавый Топор-Пламегор"
+local function counts(list) local c = {}; for i = 1, 7 do c[i] = list[i] or { 0, 0 } end; return c end
+
+test("курс: +1% за победу, -1% за смерть; перевес — доля побед", function()
+  near(Wr.rate(0, 0), 100); near(Wr.rate(1, 0), 101); near(Wr.rate(0, 1), 99)
+  near(Wr.rate(2, 1), 100 * 1.01 * 1.01 * 0.99)
+  eq(Wr.balance(3, 1), 0.75); eq(Wr.balance(0, 0), nil)
+  eq(Wr.balanceText(0.63), "Орда 63% — 37% Альянс"); eq(Wr.balanceText(nil), "стычек за неделю не было")
+end)
+
+test("сообщение со счётом: туда и обратно", function()
+  local c = counts({ { 1, 0 }, [7] = { 12, 3 } })
+  local text = Wr.encode(TODAY, c)
+  eq(text, "S|" .. TODAY .. "|1,0;0,0;0,0;0,0;0,0;0,0;12,3")
+  local m = assert(Wr.decode(text, TODAY))
+  eq(m.kind, "S"); eq(m.day, TODAY); eq(m.counts[1][1], 1); eq(m.counts[7][1], 12); eq(m.counts[7][2], 3)
+  eq(Wr.decode("Q", TODAY).kind, "Q")
+end)
+
+test("кривые и подозрительные сообщения отбрасываются", function()
+  local good = Wr.encode(TODAY, counts({}))
+  eq(select(2, Wr.decode("привет", TODAY)), "формат")
+  eq(select(2, Wr.decode("S|" .. TODAY .. "|1,0;0,0", TODAY)), "формат")
+  eq(select(2, Wr.decode("S|" .. TODAY .. "|1,0;;0,0;0,0;0,0;0,0;0,0", TODAY)), "формат")
+  eq(select(2, Wr.decode("S|" .. (TODAY + 5) .. good:match("|[^|]+$"), TODAY)), "день из будущего")
+  eq(select(2, Wr.decode(Wr.encode(TODAY, counts({ { 1000, 0 } })), TODAY)), "слишком много за сутки")
+  local db = C.db()
+  eq(Wr.receive(db, GUILD, "Друг-Пламегор", "мусор", TODAY, "Громмаш-Пламегор"), nil)
+  eq(Wr.diag.rejected, 1)
+end)
+
+test("свои сообщения не считаются дважды", function()
+  local db = C.db()
+  local kind, why = Wr.receive(db, GUILD, "Громмаш-Пламегор", Wr.encode(TODAY, counts({ [7] = { 5, 0 } })), TODAY, "Громмаш-Пламегор")
+  eq(kind, nil); eq(why, "своё"); eq(next(Wr.guild(db, GUILD).peers), nil)
+end)
+
+test("индекс гильдии = мой счёт + последние счета согильдейцев", function()
+  inGuild()
+  local db = C.db()
+  db.kills = {
+    { hero = "Громмаш-Пламегор", killer = "me", ts = at(TODAY) },
+    { hero = "Громмаш-Пламегор", killer = "me", ts = at(TODAY - 1) },
+    { hero = "Громмаш-Пламегор", killer = "ally", ts = at(TODAY) },               -- добил соратник — не наш счёт
+    { hero = "Громмаш-Пламегор", killer = "me", ts = at(TODAY), test = true },    -- тестовая
+    { hero = "Громмаш-Пламегор", killer = "me", ts = at(TODAY - 8) },             -- вне окна
+  }
+  db.deaths = { { hero = "Громмаш-Пламегор", ts = at(TODAY) } }
+  Wr.receive(db, GUILD, "Друг-Пламегор", Wr.encode(TODAY, counts({ [7] = { 1, 1 } })), TODAY, "Громмаш-Пламегор")
+  Wr.receive(db, GUILD, "Друг-Пламегор", Wr.encode(TODAY, counts({ [7] = { 3, 1 } })), TODAY, "Громмаш-Пламегор") -- обновил счёт
+  Wr.receive(db, GUILD, "Лира-Пламегор", Wr.encode(TODAY - 3, counts({ { 50, 0 }, [7] = { 2, 0 } })), TODAY, "Громмаш-Пламегор")
+  local r = Wr.totals(db, GUILD, TODAY, "Громмаш-Пламегор")
+  eq(r.k, 2 + 3 + 2, "побед"); eq(r.d, 1 + 1, "потерь"); eq(r.members, 3)
+  eq(r.mine.k, 2); eq(r.mine.d, 1)
+  eq(r.days[7].k, 1 + 3); eq(r.days[4].k, 2, "счёт Лиры сдвинут на её день")
+  near(r.rate, Wr.rate(7, 2)); near(r.change, r.days[7].rate - r.days[6].rate)
+end)
+
+test("вне гильдии — только свой счёт; альты в той же гильдии считаются", function()
+  local db = C.db()
+  db.kills = { { hero = "Громмаш-Пламегор", killer = "me", ts = at(TODAY) }, { hero = "Алт-Пламегор", killer = "me", ts = at(TODAY) } }
+  local solo = Wr.totals(db, nil, TODAY, "Громмаш-Пламегор")
+  eq(solo.k, 1); eq(solo.members, 1)
+  Wr.state(db).heroGuild["Алт-Пламегор"] = GUILD
+  local r = Wr.totals(db, GUILD, TODAY, "Громмаш-Пламегор")
+  eq(r.k, 2); eq(r.members, 2)
+end)
+
+test("молчащие больше 14 дней согильдейцы забываются", function()
+  local db = C.db()
+  Wr.guild(db, GUILD).peers["Старый-Пламегор"] = { day = TODAY - 20, counts = counts({}), seen = TODAY - 20 }
+  Wr.receive(db, GUILD, "Друг-Пламегор", Wr.encode(TODAY, counts({})), TODAY, "Громмаш-Пламегор")
+  eq(Wr.guild(db, GUILD).peers["Старый-Пламегор"], nil); assert(Wr.guild(db, GUILD).peers["Друг-Пламегор"])
+end)
+
+test("смерть: враг держит меня в цели — засчитана, с именем", function()
+  W.guids.nameplate3 = "Player-1-A"; W.factions = { nameplate3 = "Alliance" }; W.onMe = { nameplate3target = true }; W.names = { nameplate3 = "Ламберт" }
+  eq(C.onPlayerDead(), "enemy")
+  local d = C.db().deaths
+  eq(#d, 1); eq(d[1].killer, "Ламберт"); eq(d[1].hero, "Громмаш-Пламегор"); eq(C.diag.deaths.enemy, 1)
+  eq(#timers, 1, "счёт уйдёт гильдии")
+end)
+
+test("смерть без врага рядом и от своих не засчитывается", function()
+  eq(C.onPlayerDead(), "none")
+  W.guids.nameplate1 = "Player-1-H"; W.factions = { nameplate1 = "Horde" }; W.onMe = { nameplate1target = true }
+  eq(C.onPlayerDead(), "none")
+  W.guids.nameplate2 = "Player-1-A"; W.factions.nameplate2 = "Alliance"          -- враг есть, но бьёт не меня
+  eq(C.onPlayerDead(), "none")
+  eq(#C.db().deaths, 0); eq(C.diag.deaths.none, 3)
+end)
+
+test("смерть: secret — пропуск, не ошибка", function()
+  W.guids.nameplate1 = "Player-1-A"; W.factions = { nameplate1 = SECRET }
+  eq(C.onPlayerDead(), "secret"); eq(#C.db().deaths, 0)
+  W.factions = { nameplate1 = "Alliance" }; W.onMe = { nameplate1target = SECRET }
+  eq(C.onPlayerDead(), "secret")
+end)
+
+test("смерть: враг был моей целью в последние 15 с", function()
+  W.guids.target = "Player-1-A"; W.factions = { target = "Alliance" }; W.names = { target = "Гизмо" }
+  C.noteTarget()
+  W.guids.target = nil
+  clock = clock + 10
+  eq(C.onPlayerDead(), "enemy"); eq(C.db().deaths[1].killer, "Гизмо")
+  clock = clock + 20
+  eq(C.onPlayerDead(), "none")
+end)
+
+test("отправка счёта откладывается и склеивается", function()
+  inGuild()
+  local db = C.db()
+  db.kills = { { hero = "Громмаш-Пламегор", killer = "me", ts = at(TODAY) } }
+  Wr.changed(); Wr.changed(); Wr.changed()
+  eq(#timers, 1); eq(timers[1].d, 5); eq(#addonSent, 0)
+  runTimers()
+  eq(#addonSent, 1); eq(addonSent[1].p, "HChron1"); eq(addonSent[1].ch, "GUILD")
+  eq(addonSent[1].t, "S|" .. TODAY .. "|0,0;0,0;0,0;0,0;0,0;0,0;1,0")
+  eq(Wr.state(db).heroGuild["Громмаш-Пламегор"], GUILD)
+end)
+
+test("без гильдии или с выключенной галочкой счёт не уходит", function()
+  Wr.changed(); runTimers(); eq(#addonSent, 0)
+  inGuild(); C.db().settings.shareWar = false
+  Wr.changed(); runTimers(); eq(#addonSent, 0)
+  eq(C.db().settings.shareWar, false)
+end)
+
+test("не ушло — повторим позже", function()
+  inGuild(); W.sendResult = 7
+  eq(Wr.sendState(), false); eq(Wr.dirty, true); eq(Wr.diag.failed, 1)
+  W.sendResult = 0
+  eq(Wr.sendState(), true); eq(Wr.dirty, false)
+end)
+
+test("ответ на запрос: со случайной задержкой и не чаще раза в 30 с", function()
+  inGuild()
+  Wr.onAddonMessage("HChron1", "Q", "GUILD", "Друг-Пламегор")
+  Wr.onAddonMessage("HChron1", "Q", "GUILD", "Лира-Пламегор")
+  eq(#timers, 1); assert(timers[1].d >= 1 and timers[1].d <= 8)
+  runTimers(); eq(#addonSent, 1)
+  Wr.onAddonMessage("HChron1", "Q", "GUILD", "Друг-Пламегор"); eq(#timers, 0, "перерыв 30 с")
+  clock = clock + 31
+  Wr.onAddonMessage("HChron1", "Q", "GUILD", "Друг-Пламегор"); eq(#timers, 1)
+end)
+
+test("чужой префикс и не гильдейский канал игнорируются", function()
+  inGuild()
+  local text = Wr.encode(TODAY, counts({ [7] = { 4, 0 } }))
+  Wr.onAddonMessage("DBM", text, "GUILD", "Друг-Пламегор")
+  Wr.onAddonMessage("HChron1", text, "WHISPER", "Друг-Пламегор")
+  eq(next(Wr.guild(C.db(), GUILD).peers), nil)
+  Wr.onAddonMessage("HChron1", text, "GUILD", "Друг-Пламегор")
+  eq(Wr.guild(C.db(), GUILD).peers["Друг-Пламегор"].counts[7][1], 4)
+end)
+
+test("имя отправителя: мир без пробелов и дефисов", function()
+  eq(Wr.norm("Громмаш-Серебряная Длань"), "Громмаш-СеребрянаяДлань"); eq(Wr.norm("Гром-Азжол-Неруб"), "Гром-АзжолНеруб")
 end)
 
 print(("Тесты: %d прошло, %d упало"):format(passed, failed))

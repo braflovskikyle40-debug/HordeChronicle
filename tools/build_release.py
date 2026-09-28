@@ -23,6 +23,8 @@ PUBLIC_FILES = [
 EMPTY_SAGAS = ("-- Сказания ИИ-летописца. Файл перезаписывает tools/chronicle.py (Летопись_ИИ.bat) — руками не править.\n"
                "HordeChronicle_Sagas = HordeChronicle_Sagas or {}\n")
 GITIGNORE = "wow_path.txt\nchronicle.html\n__pycache__/\n.pytest_cache/\n.omc/\n"
+# .bat и .ps1 в «Download ZIP» с GitHub должны прийти с CRLF, иначе cmd/PowerShell читают их криво
+GITATTRIBUTES = "*.bat text eol=crlf\n*.ps1 text eol=crlf\n"
 # Имя пользователя Windows и папка рабочего пространства берутся с этой машины, а не пишутся в файл:
 # иначе сам сборщик выдал бы их в публичном репозитории.
 PRIVATE = re.compile("|".join([re.escape(Path.home().name), re.escape(PROJECT.parents[1].name),
@@ -52,6 +54,7 @@ def build(out: Path) -> tuple[Path, Path]:
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(src, dst)
     (repo / ".gitignore").write_text(GITIGNORE, encoding="utf-8")
+    (repo / ".gitattributes").write_text(GITATTRIBUTES, encoding="utf-8")
 
     leaks = [str(p.relative_to(repo)) for p in repo.rglob("*") if p.is_file()
              and p.suffix not in (".bat",) and PRIVATE.search(p.read_text(encoding="utf-8", errors="ignore"))]

@@ -1,4 +1,4 @@
--- Книга летописи: вкладки «Летопись», «Статистика», «Настройки».
+-- Книга летописи: вкладки «Летопись», «Статистика», «Война», «Настройки».
 local _, ns = ...
 
 local B = {}
@@ -74,6 +74,46 @@ local function statsText()
   return table.concat(L, "\n")
 end
 
+local BAR_CELLS, BAR_TEX = 40, "Interface\\Buttons\\WHITE8X8"
+local FACTION_RGB = { Horde = { 220, 50, 50 }, Alliance = { 60, 130, 240 } }
+
+-- Шкала перевеса из цветных квадратиков (текстурные вставки |T…|t с цветом)
+local function balanceBar(balance)
+  local mine, enemy = ns.War.sides()
+  local left = math.floor((balance or 0.5) * BAR_CELLS + 0.5)
+  local function cells(n, rgb)
+    rgb = rgb or { 150, 150, 150 }
+    local cell = ("|T%s:14:8:0:0:8:8:0:8:0:8:%d:%d:%d|t"):format(BAR_TEX, rgb[1], rgb[2], rgb[3])
+    return cell:rep(n)
+  end
+  if not balance then return cells(BAR_CELLS) end
+  return cells(left, FACTION_RGB[mine]) .. cells(BAR_CELLS - left, FACTION_RGB[enemy])
+end
+
+local function warText()
+  local W = ns.War
+  local r = W.report()
+  local L = {}
+  local g = W.guildKey() and GetGuildInfo("player")
+  L[#L + 1] = ORANGE .. (g and ("Индекс войны гильдии «" .. clean(g) .. "»") or "Индекс войны (вы не в гильдии — считается только ваш счёт)") .. END
+  local up = r.change >= 0
+  L[#L + 1] = ("Курс очков войны: %s%.2f%s   %s%s%.2f за сутки%s"):format(GOLD, r.rate, END,
+    up and "|cff4cd964" or RED, up and "+" or "", r.change, END)
+  L[#L + 1] = balanceBar(r.balance)
+  L[#L + 1] = W.balanceText(r.balance)
+  L[#L + 1] = ("За 7 дней: побед %d, потерь %d.   Ваш вклад: побед %d, потерь %d."):format(r.k, r.d, r.mine.k, r.mine.d)
+  if g then L[#L + 1] = "Участников с аддоном: " .. r.members end
+  L[#L + 1] = "\n" .. ORANGE .. "По дням (сутки по UTC)" .. END
+  for i = #r.days, 1, -1 do
+    local t = r.days[i]
+    L[#L + 1] = ("  %s   побед %d   потерь %d   курс %.2f"):format(date("!%d.%m", t.day * 86400), t.k, t.d, t.rate)
+  end
+  L[#L + 1] = "\n" .. GREY .. "Каждая победа над игроком другой фракции даёт курсу +1%, каждая смерть от такого игрока — -1%. "
+    .. "Смерть засчитывается, если в этот момент враг держал вас в цели или вы недавно сами били врага, — это приблизительно. "
+    .. "Счёт присылают согильдейцы с аддоном 0.3.0 и новее. Это игровые очки, не деньги." .. END
+  return table.concat(L, "\n")
+end
+
 local function button(parent, label, w, onClick)
   local b = CreateFrame("Button", nil, parent, "UIPanelButtonTemplate")
   b:SetSize(w, 24)
@@ -135,6 +175,7 @@ local function buildSettings(parent)
     { "Показывать баннер победы", "toast" },
     { "Звук победы", "sound" },
     { "Скриншот в момент победы", "screenshot" },
+    { "Делиться счётом «Индекса войны» с гильдией", "shareWar" },
   }
   for _, o in ipairs(opts) do
     local c = checkbox(p, o[1], function() return s()[o[2]] end, function(v) s()[o[2]] = v end)
@@ -171,7 +212,7 @@ local function build()
   local tabs = {}
   local function setTab(name) B.tab = name; B.refresh() end
   local x = 14
-  for _, t in ipairs({ { "chronicle", "Летопись" }, { "stats", "Статистика" }, { "settings", "Настройки" } }) do
+  for _, t in ipairs({ { "chronicle", "Летопись" }, { "stats", "Статистика" }, { "war", "Война" }, { "settings", "Настройки" } }) do
     local b = button(f, t[2], 120, function() setTab(t[1]) end)
     b:SetPoint("TOPLEFT", x, -30)
     tabs[t[1]] = b
@@ -234,7 +275,8 @@ function B.refresh()
     for _, c in ipairs({ f.settings:GetChildren() }) do local h = c:GetScript("OnShow"); if h then h(c) end end
     return
   end
-  f.text:SetText(B.tab == "stats" and statsText() or chronicleText())
+  local texts = { stats = statsText, war = warText }
+  f.text:SetText((texts[B.tab] or chronicleText)())
   f.child:SetHeight(f.text:GetStringHeight() + 16)
 end
 
